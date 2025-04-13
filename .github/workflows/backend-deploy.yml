@@ -1,0 +1,63 @@
+name: Deploy Backend to Amazon Linux EC2
+
+on:
+  push:
+    branches:
+      - main  # Adjust as needed
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'  # Adjust based on your Node.js version
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Build
+      run: npm run build  # Adjust based on your build script
+
+    - name: Run tests
+      run: npm test  # Adjust if you have tests
+
+    - name: Deploy to EC2
+      env:
+        EC2_HOST: ${{ secrets.BACKEND_EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}  # Should be ec2-user for Amazon Linux
+        EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+      run: |
+          echo "$EC2_SSH_KEY" > key.pem
+          chmod 600 key.pem
+          
+          # Create dist folder for deployment
+          mkdir -p deployment
+          cp -r dist package.json package-lock.json prisma .env.example deployment/
+          
+          # Create .env file from secrets
+          echo "DATABASE_URL=\"$DATABASE_URL\"" > deployment/.env
+          echo "JWT_SECRET=\"$JWT_SECRET\"" >> deployment/.env
+          echo "PORT=5001" >> deployment/.env
+          echo "FRONTEND_URL=\"$FRONTEND_URL\"" >> deployment/.env
+          echo "NODE_ENV=\"production\"" >> deployment/.env
+          
+          # Deploy code
+          rsync -avz -e "ssh -i key.pem -o StrictHostKeyChecking=no" deployment/ $EC2_USER@$EC2_HOST:/var/www/notes-api/
+          
+          # Run remote commands to restart service
+          ssh -i key.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << 'EOF'
+            cd /var/www/notes-api
+            npm ci --production
+            npx prisma migrate deploy
+            pm2 restart notes-api || pm2 start dist/server.js --name "notes-api"
+            pm2 save
+          EOF

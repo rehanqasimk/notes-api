@@ -1,0 +1,72 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches:
+      - main  # Adjust this to your branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Build TypeScript
+      run: npm run build
+
+    - name: Generate Prisma client
+      run: npx prisma generate
+
+    - name: Deploy to EC2
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        PORT: "5001"
+        FRONTEND_URL: ${{ secrets.FRONTEND_URL }}
+        NODE_ENV: "production"
+      run: |
+        echo "$EC2_SSH_KEY" > key.pem
+        chmod 600 key.pem
+        
+        # Create .env file with secrets
+        echo "Creating .env file"
+        cat > .env << EOF
+        DATABASE_URL=$DATABASE_URL
+        JWT_SECRET=$JWT_SECRET
+        PORT=$PORT
+        FRONTEND_URL=$FRONTEND_URL
+        NODE_ENV=$NODE_ENV
+        EOF
+        
+        # Deploy application files
+        echo "Deploying application files"
+        ssh -i key.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST "mkdir -p /var/www/notes-api"
+        rsync -avz -e "ssh -i key.pem -o StrictHostKeyChecking=no" \
+          --exclude "node_modules" \
+          --exclude ".git" \
+          ./ $EC2_USER@$EC2_HOST:/var/www/notes-api/
+
+        # Install dependencies and restart application
+        ssh -i key.pem -o StrictHostKeyChecking=no $EC2_USER@$EC2_HOST << 'EOF'
+          cd /var/www/notes-api
+          npm install --production
+          npm run postinstall
+          pm2 delete notes-api || true
+          pm2 start dist/server.js --name notes-api
+          pm2 save
+          sudo systemctl restart nginx
+          echo "Deployment complete!"
+        EOF
